@@ -327,6 +327,10 @@
             <p class="text-[11px] text-slate-400 uppercase tracking-wider">Overall Score</p>
             <p id="overallScoreValue" class="text-xl font-bold text-indigo-400">--/100</p>
           </div>
+          <button id="submitInstructorBtn" type="button" class="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold bg-amber-600 hover:bg-amber-500 text-white transition">
+            <i data-lucide="send" class="w-4 h-4"></i>
+            Submit to Instructor
+          </button>
           <button id="downloadReportBtn" type="button" class="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition">
             <i data-lucide="file-down" class="w-4 h-4"></i>
             Download Submission Report
@@ -355,6 +359,12 @@
       </div>
 
       <div class="p-6 overflow-y-auto space-y-6">
+        <div class="bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-2">
+          <label for="settingEndpointUrl" class="block text-xs font-semibold uppercase tracking-wider text-indigo-400">Instructor Google Apps Script URL (Optional)</label>
+          <input id="settingEndpointUrl" type="url" placeholder="https://script.google.com/macros/s/.../exec" class="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+          <p class="text-[11px] text-slate-400">Or share your page link with <code class="text-indigo-300">?endpoint=YOUR_URL</code> so students submit automatically.</p>
+        </div>
+
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>
             <label for="settingPrepSec" class="block text-xs font-medium text-slate-400 mb-1.5">Prep Time</label>
@@ -442,6 +452,7 @@
     ];
 
     const state = {
+      endpointUrl: '',
       studentName: '',
       studentId: '',
       questions: JSON.parse(JSON.stringify(DEFAULT_QUESTIONS)),
@@ -1278,6 +1289,85 @@
       showToast('Submission Report downloaded!', 'success');
     }
 
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const res = String(reader.result || '');
+          const idx = res.indexOf(',');
+          resolve(idx >= 0 ? res.slice(idx + 1) : res);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    async function submitToInstructor() {
+      const url = (state.endpointUrl || '').trim();
+      if (!url) {
+        showToast('No Instructor Endpoint URL set. Open Configure to add your Apps Script URL.', 'warn');
+        openSettings();
+        return;
+      }
+
+      const btn = $('submitInstructorBtn');
+      const prevHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.textContent = 'Submitting...';
+
+      try {
+        const answers = [];
+        for (let i = 0; i < state.questions.length; i++) {
+          const q = state.questions[i];
+          const rec = state.recordings[q.id];
+          let mediaBase64 = '';
+          let mimeType = '';
+          if (rec && rec.blob) {
+            mediaBase64 = await blobToBase64(rec.blob);
+            mimeType = rec.mimeType || 'video/webm';
+          }
+          answers.push({
+            questionNumber: i + 1,
+            category: q.category,
+            question: q.text,
+            durationSec: rec ? rec.durationSec : 0,
+            transcript: rec ? rec.transcript : '',
+            score: rec && rec.evaluation ? rec.evaluation.score : 0,
+            status: rec && rec.evaluation ? rec.evaluation.status : 'Skipped',
+            star: rec ? rec.star : { s: false, t: false, a: false, r: false },
+            tips: rec && rec.evaluation ? rec.evaluation.tips : [],
+            mediaBase64,
+            mimeType
+          });
+        }
+
+        const payload = {
+          studentName: state.studentName || 'Anonymous Student',
+          studentId: state.studentId || 'N/A',
+          overallScore: computeOverallScore(),
+          submittedAt: new Date().toISOString(),
+          answers
+        };
+
+        await fetch(url, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify(payload)
+        });
+
+        btn.className = 'inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold bg-emerald-700 text-white cursor-default';
+        btn.innerHTML = '<i data-lucide="check-circle" class="w-4 h-4"></i> Submitted to Instructor';
+        if (window.lucide) lucide.createIcons();
+        showToast('Submitted! Recordings and scores sent to instructor.', 'success');
+      } catch (err) {
+        btn.disabled = false;
+        btn.innerHTML = prevHtml;
+        if (window.lucide) lucide.createIcons();
+        showToast('Submission failed. Check your Apps Script URL and try again.', 'error');
+      }
+    }
+
     // ==================== SETTINGS MODAL ====================
     function renderSettingsQuestions() {
       const list = $('settingsQuestionList');
@@ -1323,6 +1413,7 @@
     }
 
     function openSettings() {
+      $('settingEndpointUrl').value = state.endpointUrl || '';
       $('settingPrepSec').value = String(state.prepSeconds);
       $('settingAnswerSec').value = String(state.answerSeconds);
       $('settingRetakes').value = String(state.allowRetakes);
@@ -1331,6 +1422,8 @@
     }
 
     function closeSettings() {
+      state.endpointUrl = $('settingEndpointUrl').value.trim();
+      try { localStorage.setItem('interviewstudio_endpoint', state.endpointUrl); } catch (e) {}
       state.prepSeconds = Number($('settingPrepSec').value);
       state.answerSeconds = Number($('settingAnswerSec').value);
       state.allowRetakes = $('settingRetakes').value === 'true';
@@ -1340,6 +1433,16 @@
 
     // ==================== EVENT WIRING ====================
     window.addEventListener('DOMContentLoaded', () => {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const qp = params.get('endpoint');
+        if (qp) {
+          state.endpointUrl = qp.trim();
+        } else {
+          const saved = localStorage.getItem('interviewstudio_endpoint');
+          if (saved) state.endpointUrl = saved;
+        }
+      } catch (e) {}
       initVisualizerBars();
       updateLobbyMeta();
       if (window.lucide) lucide.createIcons();
@@ -1425,6 +1528,7 @@
       });
 
       $('endEarlyBtn').addEventListener('click', openReviewView);
+      $('submitInstructorBtn').addEventListener('click', submitToInstructor);
       $('downloadReportBtn').addEventListener('click', downloadSubmissionReport);
 
       $('restartInterviewBtn').addEventListener('click', () => {
